@@ -1,302 +1,164 @@
-# 🔗 Introduction to LangChain - Python
+# 🍳 Recipes Agent — "what can I cook with this?"
 
-## Introduction
+A multimodal LangChain agent that takes a **photo of your fridge**, works out what's in it,
+searches the live web for real recipes, and comes back with a short list you can actually cook.
 
-Welcome to LangChain Academy's **Introduction to LangChain** course!
-
-This repository is the companion to the course located [HERE](https://academy.langchain.com/courses/foundation-introduction-to-langchain-python).
+Built with LangChain 1.x `create_agent` (LangGraph under the hood), Claude Haiku 4.5, Tavily
+web search, and a self-hosted **Langfuse** stack for tracing every run.
 
 ---
 
-## 🚀 Setup
+## Demo
 
-### Prerequisites
+Input — `examples/test.jpg`, an ordinary photo of an open fridge:
 
-- The [Chrome](https://www.google.com/chrome/) browser is recommended
-- [git](https://git-scm.com/install/) is recommended
-- A package/project manager: [uv](https://docs.astral.sh/uv/) (recommended) or [pip](https://pypi.org/project/pip/)
-- note: `uv` is also required in Module 2, Lesson 1 to run the MCP server with `uvx`
-- The course requires Python >=3.12, <3.14  If you use `uv`, it will take care of this for you. [More info](#python-virtual-environments)
+<img src="examples/test.jpg" width="300" alt="Photo of an open fridge containing eggs, raw meat, a tub of leftovers and a head of lettuce" />
 
-### Installation
+The agent sees eggs, raw meat, a plastic tub and some greens, searches the web for recipes
+that use them, and answers with something like:
 
-Download the course repository
-```bash
-# Clone the repo
-git clone --depth 1 https://github.com/langchain-ai/lca-lc-foundations.git
-cd lca-lc-foundations
+> Based on what I can see in your fridge — eggs, minced/diced meat, and lettuce:
+>
+> 1. **Meat & Egg Skillet** — everything in one pan, served over the lettuce. ~20 min.
+> 2. **Meatball Lettuce Wraps** — uses the meat and lettuce; you'd need breadcrumbs. ~30 min.
+> 3. **Egg Fried Rice with Meat** — quick and filling, but needs cooked rice you didn't show.
+>
+> Want the full recipe for one of these?
+
+Ask for *"the first one"* and it searches the web again — specifically for that recipe — before
+giving step-by-step instructions.
+
+---
+
+## How it works
+
+```
+ photo (base64)                                   ┌──────────────┐
+      +           ──►  HumanMessage  ──►  Agent  ─┤ web_search   │──►  Tavily API
+ "what can I make?"     (multimodal)     (Claude) └──────────────┘
+                                            │
+                                     InMemorySaver          every step streamed
+                                     (thread_id = "1")  ──────────────────────►  Langfuse
+                                     short-term memory                          (self-hosted)
 ```
 
-Make a copy of example.env
-```bash
-# Create .env file
-cp example.env .env
+| Piece | Choice | Why |
+|---|---|---|
+| Agent loop | `langchain.agents.create_agent` | ReAct-style tool loop on LangGraph, no hand-rolled orchestration |
+| Model | `claude-haiku-4-5`, `temperature=0.3` | Vision-capable, cheap and fast enough for an interactive loop |
+| Tool | Tavily `web_search` | Search results already formatted for LLM consumption |
+| Memory | `InMemorySaver` + `thread_id` | Follow-ups like *"give me the recipe for the first one"* resolve against history |
+| Vision input | `HumanMessage` with `{"type": "image", "base64": ..., "mime_type": ...}` | Content-block format of LangChain 1.x |
+| Tracing | Langfuse v3, self-hosted | Full local observability with no data leaving the machine |
+
+### Details worth pointing at
+
+**Forcing the search.** The interesting engineering here isn't the graph — it's the prompt.
+A recipe model will happily answer from memory, which produces plausible recipes that nobody
+published. The system prompt makes the web search non-negotiable: a rule at the top, a
+numbered protocol, three few-shot examples that all show a search call, and a closing
+reminder. It also forbids claiming a search happened when it didn't, and requires a *second*
+search when the user asks for full instructions of a specific recipe.
+
+**MIME sniffing by magic bytes.** Browser file uploads through `ipywidgets.FileUpload` don't
+carry a reliable content type, so the notebook reads the file signature (`\xff\xd8\xff` → JPEG,
+`\x89PNG\r\n\x1a\n` → PNG, `RIFF....WEBP` → WebP, …) instead of trusting the filename.
+
+**Tracing without touching call sites.** [`recipes_agent/tracing.py`](recipes_agent/tracing.py)
+registers the Langfuse handler through LangChain's `register_configure_hook`, so every
+`.invoke()` in the process is traced without passing `config={"callbacks": [...]}` anywhere.
+Passing `CallbackHandler` as the handler class means an explicitly-supplied handler wins and
+runs are never double-traced. `LANGFUSE_TRACING=false` turns the whole thing off without a
+code change.
+
+---
+
+## Project structure
+
+```
+recipes-agent/
+├── recipes_agent/
+│   ├── main.ipynb        # the agent: tools, prompt, multimodal invoke
+│   └── tracing.py        # global Langfuse handler + flush()
+├── examples/
+│   └── test.jpg          # sample fridge photo used in the demo
+├── docker-compose.yml    # self-hosted Langfuse v3 (6 services)
+├── .env.example          # every variable the project reads
+├── env_utils.py          # environment sanity checker
+└── pyproject.toml
 ```
 
-Edit the .env file to include the keys below for [Models](#model-providers) and optionally [LangSmith](#getting-started-with-langsmith)
+---
 
-- Get an OpenAI API Key [here](https://openai.com/index/openai-api/).  
-- Optional for Module1/Lesson1, get an Anthropic API Key [here](https://console.anthropic.com) and a Google API Key [here](https://ai.google.dev/gemini-api/docs/quickstart).
-- Optional, Create a [LangSmith](https://smith.langchain.com/) account and API Key.  
+## Setup
 
-```bash
-# Manual installs for checking: uv
-
-# Required
-OPENAI_API_KEY='your_openai_api_key_here'
-TAVILY_API_KEY='your_tavily_api_key_here'
-
-# optional, only used in Module1, Lesson 1 once
-ANTHROPIC_API_KEY='your_anthropic_api_key_here'
-GOOGLE_API_KEY='your_google_api_key_here'
-
-# Optional for evaluation and tracing
-LANGSMITH_API_KEY='your_langsmith_api_key_here'
-# uncomment to set tracing to true when you set up your LangSmith account
-#LANGSMITH_TRACING=true
-LANGSMITH_PROJECT=lca-lc-foundation
-# Uncomment the following if you are on the EU instance:
-#LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
-```
-
-
-Make a virtual environment and install dependencies. [More info](#python-virtual-environments)
-
-<details open>
-<summary>Using uv (recommended)</summary>
+**Requirements:** Python ≥3.12 <3.14, [uv](https://docs.astral.sh/uv/), Docker (only for tracing).
 
 ```bash
+git clone <repo-url> && cd recipes-agent
 uv sync
+cp .env.example .env     # then fill in the keys
 ```
 
-</details>
+Keys you actually need for the agent:
 
-<details>
-<summary>Using pip</summary>
+| Variable | Where to get it |
+|---|---|
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
+| `TAVILY_API_KEY` | [tavily.com](https://tavily.com) — generous free tier |
+
+Everything else in `.env.example` belongs to the optional Langfuse stack.
+
+### Tracing (optional)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+openssl rand -base64 32      # generate NEXTAUTH_SECRET and SALT
+docker compose up -d         # Langfuse on http://localhost:3000
 ```
 
-</details>
+Sign up in the local Langfuse UI, create a project, copy the public/secret keys into
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`. To skip all of this, set
+`LANGFUSE_TRACING=false` — the notebook runs fine without it.
 
-### Setup Verification
+Langfuse v3 needs Postgres + ClickHouse + Redis + S3-compatible storage; none of them are
+optional, which is why the compose file has six services. Two images are pinned deliberately:
+MinIO comes from quay.io (Docker Hub's copy now requires auth) and ClickHouse is pinned to
+`25.3` (the `latest` tag shipped a 0-byte entrypoint).
 
-After completing the Setup section, we recommend you run the following command to verify your environment.
-
-<details open>
-<summary>Using uv</summary>
-
-```bash
-uv run python env_utils.py
-```
-
-</details>
-
-<details>
-<summary>Using pip</summary>
-
-```bash
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python env_utils.py
-```
-
-</details>
-
-[If the script flags issues, see this section below.](#setup-verification-issues)
-
-### Run Notebooks [More Info](#development-environment)
-
-<details open>
-<summary>Using uv (recommended)</summary>
+### Run
 
 ```bash
 uv run jupyter lab
 ```
 
-</details>
-
-<details>
-<summary>Using pip</summary>
-
-```bash
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-jupyter lab
-```
-
-</details>
-
-### Run Studio (optional)
-
-Ensure you are in the notebooks/module-1 or notebooks/module-3 directory
-
- <details open>
-<summary>Using uv (recommended)</summary>
-
-```bash
-uv run langgraph dev
-```
-
-</details>
-
-<details>
-<summary>Using pip</summary>
-
-```bash
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-langgraph dev
-```
-
-</details>
-
-## 📚 Lessons
-This repository contains three Modules that serve as introductions to many of LangChain's most-used features.
+Open [`recipes_agent/main.ipynb`](recipes_agent/main.ipynb) and run the cells top to bottom.
+The upload widget cell renders a file picker — drop in `examples/test.jpg` (or a photo of your
+own fridge), then run the rest.
 
 ---
 
-### Module 1: Create Agent
+## Known issues
 
-- Foundational models
-- Tools
-- Short-Term Memory
-- Multimodal Messages
-- Project: Personal Chef
+- **`Media upload error: [Errno 11001] getaddrinfo failed`** on `flush()`. Traces themselves
+  are fine; only the image attachment fails to upload. The SDK is handed the container-internal
+  MinIO endpoint (`http://minio:9000`), which the host can't resolve. Publishing MinIO's port
+  and pointing `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` at `localhost:9000` fixes it.
+- `InMemorySaver` means conversation history dies with the kernel — fine for a notebook, not
+  for anything deployed.
 
-### Module 2: Advanced Agent
+## Possible next steps
 
-- Model Context Protocol (MCP)
-- Context and State
-- Multi-Agent Systems
-- Project: Wedding Planner
+- Swap `InMemorySaver` for a persistent checkpointer (SQLite/Postgres).
+- Extract the notebook into a LangGraph app and serve it behind a small chat UI.
+- Structured output for suggestions (name / time / missing ingredients) instead of free-form Markdown.
+- An eval set of fridge photos scored on ingredient-recognition accuracy and whether a search
+  actually happened.
 
-### Module 3: Production-Ready Agent
+## Credits & license
 
-- What is Middleware?
-- Managing Long Conversations
-- Human In The Loop (HITL)
-- Dynamic Agents
-- Project: Email Assistant
-- Bonus: Agent Chat UI
+The repository scaffolding (`pyproject.toml`, `env_utils.py`, virtualenv setup) started from
+[LangChain Academy's *Introduction to LangChain*](https://academy.langchain.com/courses/foundation-introduction-to-langchain-python)
+course template. The agent, the prompt, the multimodal image pipeline and the Langfuse
+tracing setup are mine.
 
-## 📖 Related Resources
-
-### Setup Verification Issues
-
-**What the verification procedure checks:**
-- ✅ Python executable location and version (must be >=3.12, <3.14)
-- ✅ Virtual environment is properly activated
-- ✅ Required packages are installed with correct versions
-- ✅ Packages are in the correct Python version's site-packages
-- ✅ Environment variables (API keys) are properly configured
-
-**Configuration Issues and Solutions:**
-
-<details>
-<summary>ImportError when running env_utils.py</summary>
-
-If you see an error like `ModuleNotFoundError: No module named 'dotenv'`, you're likely running Python outside the virtual environment.
-
-**Solution:**
-- Use `uv run python env_utils.py` (recommended), or
-- Activate the virtual environment first:
-  - macOS/Linux: `source .venv/bin/activate`
-  - Windows: `.venv\Scripts\activate`
-
-</details>
-
-<details>
-<summary>Environment Variable Conflicts</summary>
-
-If you see a warning about "ENVIRONMENT VARIABLE CONFLICTS DETECTED", you have API keys set in your system environment that differ from your .env file. Since `load_dotenv()` doesn't override existing variables by default, your system values will be used.
-
-**Solutions:**
-1. Do nothing and accept the system environment variable value
-2. Unset the conflicting system environment variables for this shell session (commands provided in warning)
-3. Use `load_dotenv(override=True)` in your notebooks to force .env values to take precedence
-4. Update your .env file or shell init so the values are in agreement
-
-</details>
-
-<details>
-<summary>LangSmith Tracing Errors</summary>
-
-If you see "LANGSMITH_TRACING is enabled but LANGSMITH_API_KEY still has the example/placeholder value", you need to either:
-1. Set a valid LangSmith API key in your .env file, or
-2. Comment out or set `LANGSMITH_TRACING=false` in your .env file
-
-Note: LangSmith is optional for evaluation and tracing. The course works without it.
-
-</details>
-
-<details>
-<summary>Wrong Python Version</summary>
-
-If you see a warning about Python version not satisfying requirements, you need Python >=3.12 and <3.14.
-
-**Solution:**
-- If using `uv`: Run `uv sync` which will automatically install the correct Python version
-- If using pip: Install Python 3.12 or 3.13 using [pyenv](#python-virtual-environments) or from [python.org](https://www.python.org/downloads/)
-
-</details>
-
-### Python Virtual Environments
-
-Managing your Python version is often best done with virtual environments. This allows you to select a Python version for the course independent of the system Python version.
-
-<details open>
-<summary>Using uv (recommended)</summary>
-
-`uv` will install a version of Python compatible with the versions specified in the `pyproject.toml` in the `.venv` directory when running the `uv sync` specified above. It will use this version when invoking with `uv run`. For additional information, please see [uv](https://docs.astral.sh/uv/).
-</details>
-
-<details>
-<summary>Using pyenv + pip</summary>
-
-If you are using pip instead of uv, you may prefer using pyenv to manage your Python versions. For additional information, please see [pyenv](https://github.com/pyenv/pyenv).
-
-```bash
-pyenv install 3.12
-pyenv local 3.12
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-</details>
-
-### Model Providers
-
-If you don't have an OpenAI API key, you can sign up [here](https://openai.com/index/openai-api/). The course primarily uses gpt-5-nano which is very inexpensive.  If desired, you may also obtain additional API keys for [Anthropic](https://console.anthropic.com) or [Google](https://ai.google.dev/gemini-api/docs/quickstart).
-
-This course has been created using particular models and model providers.  You can use other providers, but you will need to update the API keys in the .env file and make some necessary code changes. LangChain supports many chat model providers. [More Info](https://docs.langchain.com/oss/python/integrations/providers/all_providers).
-
-Tavily is a search provider that returns search results in an LLM-friendly way. They have a generous free tier. [Tavily](https://tavily.com)
-
-### Getting Started with LangSmith
-
-- Create a [LangSmith](https://smith.langchain.com/) account
-- Create a LangSmith API key
-
-<img width="600" alt="LangSmith Dashboard" src="https://github.com/user-attachments/assets/e39b8364-c3e3-4c75-a287-d9d4685caad5" />
-
-<img width="600" alt="LangSmith API Keys" src="https://github.com/user-attachments/assets/2e916b2d-e3b0-4c59-a178-c5818604b8fe" />
-
-- Update the .env file you created with your new LangSmith API Key.
-- Check that LANGSMITH_TRACING is uncommented and set to true.
-
-For more information on LangSmith, see our docs [here](https://docs.langchain.com/langsmith/home).
-
-**Note:** If you enable LangSmith tracing by setting `LANGSMITH_TRACING=true` in your .env file, make sure you have a valid `LANGSMITH_API_KEY` set. The environment verification script (`env_utils.py`) will warn you if tracing is enabled without a valid key.
-
-### Environment Variables
-
-This course uses the [dotenv](https://pypi.org/project/python-dotenv) module to read key-value pairs from the .env file and set them in the environment in the Jupyter notebooks. They do not need to be set globally in your system environment.
-
-**Note:** If you have API keys already set in your system environment, they may conflict with the ones in your .env file. The `env_utils.py` verification script will detect and warn you about such conflicts. By default, `load_dotenv()` does not override existing environment variables.
-
-
-### Development Environment
-
-The course uses [Jupyter](https://jupyter.org/) notebooks. The Jupyter package is installed in the virtual environment and can be run as described above. Jupyter notebooks can also be edited and run in VSCode or other VSCode variants such as Windsurf or Cursor.
+MIT — see [LICENSE](LICENSE).
